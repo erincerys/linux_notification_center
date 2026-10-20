@@ -476,7 +476,7 @@ hideAllNotis tState = do
 
 closeNotification tState id = do
   state <- readTVarIO tState
-  let notis = filter (\n -> (notiId n) /= fromIntegral id) (notiStList state)
+  let notis = filter (\n -> (notiId n) == fromIntegral id) (notiStList state)
   sequence $ (\noti -> addSource $ notiOnClosed noti $ CloseByCall ) <$> notis
   removeNotiFromDistList' tState id
 
