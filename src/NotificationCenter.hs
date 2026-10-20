@@ -47,7 +47,7 @@ import Control.Monad
 
 import System.Process (spawnCommand, interruptProcessGroupOf, waitForProcess)
 import System.Locale.Current
-import System.Posix.Signals (sigUSR1)
+import System.Posix.Signals (sigUSR1, installHandler, Handler(..))
 import System.Posix.Daemonize (serviced, daemonize)
 import System.Directory (doesFileExist, getXdgDirectory, XdgDirectory(..))
 
@@ -77,7 +77,7 @@ import GI.Gtk
 import qualified GI.Gtk as Gtk (containerAdd, Window(..), Box(..), Label(..), Button(..), Adjustment(..))
 
 import qualified GI.Gtk as GI (init, main)
-import GI.GLib (sourceRemove, timeoutAdd, unixSignalAdd)
+import GI.GLib (sourceRemove, timeoutAdd)
 import GI.GLib.Constants
 import GI.Gdk.Constants
 import GI.Gdk.Flags (EventMask(..))
@@ -421,8 +421,9 @@ main' = do
     \istate' -> istate' { stNotiState = notiState }
   createNotiCenter istate config catalog
 
-  unixSignalAdd PRIORITY_HIGH (fromIntegral sigUSR1)
-    (showNotiCenter istate notiState config)
+  installHandler sigUSR1
+    (Catch $ void $ addSource $ void $ showNotiCenter istate notiState config)
+    Nothing
 
   ph <- spawnCommand $ configStartupCommand config
   waitForProcess ph `finally` interruptProcessGroupOf ph
