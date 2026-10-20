@@ -486,8 +486,6 @@ notificationDaemon :: (AutoMethod f1, AutoMethod f2) =>
 notificationDaemon config onNote onCloseNote = do
   putStrLn "notificationDaemon started"
   client <- connectSession
-  _ <- requestName client "org.freedesktop.Notifications"
-       [nameAllowReplacement, nameReplaceExisting]
   export client "/org/freedesktop/Notifications" defaultInterface
     { interfaceName = "org.freedesktop.Notifications"
     , interfaceMethods =
@@ -497,6 +495,9 @@ notificationDaemon config onNote onCloseNote = do
       , autoMethod "Notify" (onNote (emit client))
       ]
     }
+  _ <- requestName client "org.freedesktop.Notifications"
+       [nameAllowReplacement, nameReplaceExisting]
+  return ()
 
 startNotificationDaemon :: Config -> IO () ->  IO () ->  IO (TVar NotifyState)
 startNotificationDaemon config onUpdate onUpdateForMe = do
