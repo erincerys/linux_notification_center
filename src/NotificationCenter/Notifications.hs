@@ -47,6 +47,7 @@ import Data.List
 import qualified Data.Map as Map
 import Data.Time
 import Data.Time.LocalTime
+import Data.Time.Clock.POSIX (getPOSIXTime)
 import Data.Maybe (fromMaybe, isJust)
 
 import qualified Data.Yaml as Yaml
@@ -499,9 +500,13 @@ notificationDaemon config onNote onCloseNote = do
        [nameAllowReplacement, nameReplaceExisting]
   return ()
 
+idUnusedByEarlierRuns :: IO Int
+idUnusedByEarlierRuns = floor <$> getPOSIXTime
+
 startNotificationDaemon :: Config -> IO () ->  IO () ->  IO (TVar NotifyState)
 startNotificationDaemon config onUpdate onUpdateForMe = do
-  istate <- newTVarIO $ NotifyState [] [] 1 onUpdate onUpdateForMe config []
+  firstId <- idUnusedByEarlierRuns
+  istate <- newTVarIO $ NotifyState [] [] firstId onUpdate onUpdateForMe config []
   forkIO (notificationDaemon config (notify config istate)
           (closeNotification istate))
   return istate
