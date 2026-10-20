@@ -8,8 +8,8 @@ import Config
 import NotificationCenter.NotificationInCenter
   (DisplayingNotificationInCenter(..), showNotification, updateNoti)
 import NotificationCenter.Notifications
-  (NotifyState(..), startNotificationDaemon, hideAllNotis)
-import NotificationCenter.Notifications.Data (Notification(..))
+  (NotifyState(..), startNotificationDaemon, hideAllNotis, dropOrphans)
+import NotificationCenter.Notifications.Data (Notification(..), notiAge)
 import NotificationCenter.Glade (glade)
 import NotificationCenter.Button
   (Button(..), createButton, setButtonState)
@@ -20,8 +20,9 @@ import Prelude
 
 import System.Locale.SetLocale
 import System.IO.Unsafe
-import System.IO (readFile)
+import System.IO (readFile, hFlush, stdout)
 import System.IO.Error (tryIOError)
+import System.Environment (lookupEnv)
 
 import Data.Int (Int32(..))
 import Data.Tuple.Sequence (sequenceT)
@@ -61,6 +62,7 @@ import GI.Gtk
        , widgetGetAllocatedHeight, widgetGetAllocatedWidth, onWidgetDraw
        , adjustmentSetValue, adjustmentGetLower, adjustmentGetUpper, adjustmentGetPageSize
        , onWidgetLeaveNotifyEvent, onWidgetMotionNotifyEvent
+       , onWidgetEnterNotifyEvent, onWidgetScrollEvent
        , widgetAddEvents, alignmentSetPadding, alignmentNew, rangeSetValue
        , scaleSetDigits, scaleSetValuePos, rangeGetValue
        , afterScaleButtonValueChanged, scaleNewWithRange, containerAdd
@@ -74,13 +76,16 @@ import GI.Gtk
        , afterWindowSetFocus, labelSetText
        , onWidgetFocusOutEvent, onWidgetKeyReleaseEvent, widgetGetParentWindow
        , onButtonClicked, windowGetScreen, boxNew, widgetSetValign)
-import qualified GI.Gtk as Gtk (containerAdd, Window(..), Box(..), Label(..), Button(..), Adjustment(..))
+import qualified GI.Gtk as Gtk (containerAdd, Window(..), Box(..), Label(..), Button(..), Adjustment(..), ScrolledWindow(..))
 
 import qualified GI.Gtk as GI (init, main)
-import GI.GLib (sourceRemove, timeoutAdd)
+import GI.GLib (sourceRemove, timeoutAdd, timeoutAddSeconds)
 import GI.GLib.Constants
 import GI.Gdk.Constants
 import GI.Gdk.Flags (EventMask(..))
+import GI.Gdk (getEventScrollDirection, getEventScrollDeltaY
+              , getEventCrossingDetail)
+import GI.Gdk.Enums (ScrollDirection(..), NotifyType(..))
 import GI.Gtk.Enums
        (Orientation(..), WindowType(..), ShadowType(..)
        , PositionType(..), ReliefStyle(..), Align(..))
@@ -154,7 +159,8 @@ createNotiCenter tState config catalog = do
     , "box_notis"
     , "box_notis_adj"
     , "box_buttons"
-    , "button_deleteAll" ]
+    , "button_deleteAll"
+    , "scroll_notis" ]
     (Just "Notification area")
 
   mainWindow <- window objs "main_window"
@@ -164,6 +170,8 @@ createNotiCenter tState config catalog = do
   timeD <- label objs "label_date"
   notiBoxAdj <- adjustment objs "box_notis_adj"
   deleteButton <- button objs "button_deleteAll"
+  scrollNotis <- scrolledWindow objs "scroll_notis"
+  ignoreStaleScrollOnEnter mainWindow scrollNotis
 
   onButtonClicked deleteButton $ deleteInCenter tState
   buttonSetLabel deleteButton $ LT.toStrict $ gettext catalog "Delete all"
@@ -216,6 +224,31 @@ createNotiCenter tState config catalog = do
 
   onWidgetDestroy mainWindow mainQuit
 
+  return ()
+
+-- | GDK resets its smooth-scroll baseline on enter only for toplevel
+--   windows, not for this popup-type window, so the first scroll event
+--   after the pointer enters carries every wheel step taken in other
+--   windows since the center last saw one. Drop it, as GDK does for
+--   toplevels.
+ignoreStaleScrollOnEnter :: Gtk.Window -> Gtk.ScrolledWindow -> IO ()
+ignoreStaleScrollOnEnter window scrolled = do
+  pointerEntered <- newIORef True
+  debugScroll <- isJust <$> lookupEnv "DEADD_DEBUG_SCROLL"
+  onWidgetEnterNotifyEvent window $ \event -> do
+    detail <- getEventCrossingDetail event
+    when (detail /= NotifyTypeInferior) $ writeIORef pointerEntered True
+    return False
+  onWidgetScrollEvent scrolled $ \event -> do
+    direction <- getEventScrollDirection event
+    entered <- atomicModifyIORef' pointerEntered (\e -> (False, e))
+    let stale = entered && direction == ScrollDirectionSmooth
+    when debugScroll $ do
+      dy <- getEventScrollDeltaY event
+      putStrLn $ "scroll " ++ show direction ++ " dy=" ++ show dy
+        ++ (if stale then " (dropped)" else "")
+      hFlush stdout
+    return stale
   return ()
 
 setNotificationCenterPosition mainWindow config = do
@@ -387,6 +420,22 @@ removeNoti tState dNoti = do
   addSource $ _dNotiDestroy dNoti
   return ()
 
+pruneNotis :: Config -> TVar State -> IO ()
+pruneNotis config tState = do
+  state <- readTVarIO tState
+  notiState <- readTVarIO $ stNotiState state
+  now <- getCurrentTime
+  let maxAge = realToFrac $ configNotiCenterPruneAfterHours config * 3600
+      expired dNoti = any
+        (\n -> notiId n == _dNotiId dNoti && notiAge now n > maxAge)
+        $ notiStList notiState
+      toPrune = if maxAge > 0
+        then filter expired $ stDisplayingNotiList state
+        else []
+  mapM_ (removeNoti tState) toPrune
+  centerIds <- map _dNotiId . stDisplayingNotiList <$> readTVarIO tState
+  dropOrphans (stNotiState state) centerIds now
+
 setDeleteAllState tState = do
   addSource $ do
     state <- readTVarIO tState
@@ -424,6 +473,10 @@ main' = do
   installHandler sigUSR1
     (Catch $ void $ addSource $ void $ showNotiCenter istate notiState config)
     Nothing
+
+  timeoutAddSeconds PRIORITY_DEFAULT 60 $ do
+    pruneNotis config istate
+    return True
 
   ph <- spawnCommand $ configStartupCommand config
   waitForProcess ph `finally` interruptProcessGroupOf ph

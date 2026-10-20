@@ -14,7 +14,8 @@ module NotificationCenter.Notifications.AbstractNotification
 import Helpers (atMay, markupify)
 import Config (Config(..))
 import NotificationCenter.Notifications.Data
-  (Urgency(..), CloseType(..), Notification(..), Image(..), rawImgToPixBuf)
+  (Urgency(..), CloseType(..), Notification(..), Image(..), rawImgToPixBuf
+  , fitWithinWithoutEnlarging)
 import NotificationCenter.Notifications.Action
   (Action(..), createAction)
 import TransparentWindow (scale, label, image, box, getObjs, addClass, progressbar)
@@ -37,9 +38,7 @@ import GI.Gtk (rangeGetValue, onRangeValueChanged, rangeSetValue, widgetShowAll,
               , progressBarSetFraction, widgetSetVisible
               , catchGErrorJustDomain, GErrorMessage(..))
 import GI.GLib (FileError(..))
-import GI.GdkPixbuf (pixbufScaleSimple, pixbufGetHeight, pixbufGetWidth
-                    , Pixbuf(..), pixbufNewFromFileAtScale
-                    , InterpType(..), PixbufError(..))
+import GI.GdkPixbuf (Pixbuf(..), pixbufNewFromFileAtScale, PixbufError(..))
 import qualified GI.Gtk as Gtk
   (Scale, ProgressBar, IsWidget, Box(..), Label(..), Button(..), Window(..), Image(..)
   , Builder(..), containerAdd, containerRemove, containerGetChildren)
@@ -227,23 +226,9 @@ setImage image imageSize widget = do
       imageSetFromIconName widget
         (Just $ pack name) imageSize
       setImagePixelSize widget imageSize
-    (RawImg a) -> do
-      pb <- rawImgToPixBuf $ RawImg a
-      pb' <- scalePixbuf imageSize imageSize pb
-      imageSetFromPixbuf widget pb'
-
-
-scalePixbuf :: Int32 -> Int32 -> Pixbuf -> IO (Maybe Pixbuf)
-scalePixbuf w h pb = do
-  oldW <- fromIntegral <$> pixbufGetWidth pb :: IO Double
-  oldH <- fromIntegral <$> pixbufGetHeight pb :: IO Double
-  let targetW = fromIntegral w :: Double
-      targetH = fromIntegral h :: Double
-  if (oldW < targetW || oldH < targetH) then
-    return (Just pb)
-    else do
-    let newW = fromIntegral $ floor $ if oldW > oldH then
-          targetW else (oldW * (targetH / oldH))
-        newH = fromIntegral $ floor $ if oldW > oldH then
-          (oldH * (targetW / oldW)) else targetH
-    pixbufScaleSimple pb newW newH InterpTypeBilinear
+    (RawImg _) -> do
+      mPb <- rawImgToPixBuf image
+      case mPb of
+        (Just pb) -> imageSetFromPixbuf widget
+                     =<< fitWithinWithoutEnlarging imageSize imageSize pb
+        Nothing -> widgetSetVisible widget False

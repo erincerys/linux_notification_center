@@ -437,6 +437,10 @@ from the =deadd.css= file by using the command described in the section
     ### center anyways
     ignore-transient: false
 
+    ### Notifications older than this many hours are removed from the
+    ### notification center. 0 keeps them until deleted by hand.
+    prune-after-hours: 32
+
     ### Custom buttons in notification center
     buttons:
       ### Numbers of buttons that can be drawn on a row of the notification

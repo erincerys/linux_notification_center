@@ -142,6 +142,7 @@ data Config = Config
   , configButtonHeight :: Int
   , configButtonMargin :: Int
   , configButtons :: [ButtonConfig]
+  , configNotiCenterPruneAfterHours :: Double
   }
 
 (.:.) :: FromJSON a => Y.Parser (Maybe Y.Object) -> Text.Text -> Y.Parser (Maybe  a)
@@ -262,6 +263,7 @@ instance FromJSON Config where
     <*> thirdLevel o "notification-center" "buttons" "buttons-margin" 2
   -- configLabels
     <*> thirdLevel o "notification-center" "buttons" "actions" []
+    <*> secondLevel o "notification-center" "prune-after-hours" 32
   parseJSON _ = fail "Expected Object for Config value"
 
 data ButtonConfig = Button

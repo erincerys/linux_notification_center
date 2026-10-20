@@ -4,6 +4,7 @@ module NotificationCenter.Notifications
   ( startNotificationDaemon
   , NotifyState(..)
   , hideAllNotis
+  , dropOrphans
   ) where
 
 import Helpers (trim, isPrefix, splitOn, atMay, eitherToMaybe
@@ -15,7 +16,7 @@ import NotificationCenter.Notifications.NotificationPopup
   , DisplayingNotificationPopup(..)
   )
 import NotificationCenter.Notifications.Data
-  (Urgency(..), Notification(..), Image(..), parseImageString)
+  (Urgency(..), Notification(..), Image(..), parseImageString, thumbnailOnReceive)
 import TransparentWindow
 import Config (Config(..), ModificationRule(..))
 import NotificationCenter.Notifications.Data
@@ -24,7 +25,7 @@ import Control.Monad (when)
 import Control.Applicative ((<|>))
 import Control.Concurrent (forkIO)
 import Control.Concurrent.STM
-  (readTVarIO, stateTVar, modifyTVar, modifyTVar', TVar(..),
+  (readTVarIO, readTVar, writeTVar, modifyTVar, modifyTVar', TVar(..),
    atomically, newTVarIO)
 
 import DBus (Variant(..), Structure(..), fromVariant, signal, toVariant, variantType)
@@ -65,11 +66,11 @@ import GI.Gio.Interfaces.AppInfo (appInfoGetIcon, appInfoGetAll, appInfoGetName)
 import GI.Gio.Interfaces.Icon (iconToString, Icon(..))
 
 data NotifyState = NotifyState
-  { notiStList :: [ Notification ]
+  { notiStList :: ![ Notification ]
     -- ^ List of all notis
   , notiDisplayingList :: [ DisplayingNotificationPopup ]
     -- ^ List of all notis getting displayed as popup
-  , notiStNextId :: Int
+  , notiStNextId :: !Int
     -- ^ Id for the next noti
   , notiStOnUpdate :: IO ()
     -- ^ Update-function for the NotificationCenter
@@ -206,6 +207,9 @@ parseIcon config hints icon appName =
                     else
                       return NoImage
 
+imageHints :: [Text]
+imageHints = ["image-data", "image_data", "icon_data"]
+
 parseImg :: Map.Map Text Variant -> Text -> Image
 parseImg hints text =
   fromMaybe NoImage
@@ -251,6 +255,7 @@ notify config tState emit
   appName replaceId icon summary body actions hints timeout = do
   state <- readTVarIO tState
   time <- getTime
+  received <- getCurrentTime
   icon <- parseIcon config hints icon appName
   let newNotiWithoutId = Notification
         { notiAppName = appName
@@ -267,7 +272,7 @@ notify config tState emit
         , notiActions = actions
         , notiActionIcons = parseActionIcons hints
         , notiActionCommands = []
-        , notiHints = hints
+        , notiHints = foldr Map.delete hints imageHints
         , notiUrgency = parseUrgency hints
         , notiTimeout = timeout
         , notiTime = time
@@ -278,7 +283,8 @@ notify config tState emit
         , notiPercentage = fromIntegral
           <$> ( fromVariant =<< Map.lookup "has-percentage" hints
                 <|> Map.lookup "value" hints :: Maybe Int32 )
-        , notiClassName = ""}
+        , notiClassName = ""
+        , notiReceived = received }
 
   if Map.member (pack "deadd-notification-center")
     $ notiHints newNotiWithoutId
@@ -294,37 +300,37 @@ notify config tState emit
     do
       -- Apply modifications and run scripts for noti
       newNotiWoIdModified <- modifyNoti config newNotiWithoutId
+      img <- thumbnailOnReceive (notiImgSize newNotiWoIdModified)
+             $ notiImg newNotiWoIdModified
 
-      let newNoti = newNotiWoIdModified
+      let newNoti = newNotiWoIdModified { notiImg = img }
 
       let notisToBeReplaced = filter (\n -> _dNotiId n ==
                                        fromIntegral (notiRepId newNoti))
                               $ notiDisplayingList state
-      newId <- atomically $ stateTVar tState
-               $ \state -> (
-        notiStNextId state, state
-          { notiStNextId = notiStNextId state + 1
+      newId <- atomically $ do
+        state <- readTVar tState
+        let nextId = notiStNextId state
+        writeTVar tState $! state
+          { notiStNextId = nextId + 1
           , notiStList =
-              updatedNotiList (notiStList state)
-              (newNoti
-               { notiId = notiStNextId state
-               , notiOnClosed = emitNotificationClosed (notiSendClosedMsg newNoti)
-                 emit (notiStNextId state)
-               , notiOnAction = emitAction
-                                emit (notiStNextId state) })
+              updatedNotiList (notiStList state) (withId nextId newNoti)
               (fromIntegral (notiRepId newNoti))
-          })
-      let newNotiWithId = newNoti
-            { notiId = newId
-            , notiOnClosed = emitNotificationClosed (notiSendClosedMsg newNoti)
-                             emit newId
-            , notiOnAction = emitAction emit newId }
+          }
+        return nextId
+      let newNotiWithId = withId newId newNoti
       if length notisToBeReplaced == 0 then
         insertNewNoti newNotiWithId tState
         else
         replaceNoti newNotiWithId tState
       return $ fromIntegral $ notiId newNotiWithId
         where
+          withId :: Int -> Notification -> Notification
+          withId id noti = noti
+            { notiId = id
+            , notiOnClosed = emitNotificationClosed (notiSendClosedMsg noti)
+                             emit id
+            , notiOnAction = emitAction emit id }
           updatedNotiList :: [Notification] -> Notification
                           -> Int -> [Notification]
           updatedNotiList oldNotis newNoti repId =
@@ -451,6 +457,16 @@ removeNotiFromDistList tState id = do
     let mDn = find (\n -> _dNotiId n == id) $ notiDisplayingList state
     maybe (return ()) _dNotiDestroy mDn
   return ()
+
+orphanGraceSeconds :: NominalDiffTime
+orphanGraceSeconds = 60
+
+dropOrphans :: TVar NotifyState -> [Int] -> UTCTime -> IO ()
+dropOrphans tState centerIds now = atomically $ modifyTVar' tState $ \state ->
+  let live = centerIds ++ map _dNotiId (notiDisplayingList state)
+      shown n = notiId n `elem` live
+      fresh n = notiAge now n < orphanGraceSeconds
+  in state { notiStList = filter (\n -> shown n || fresh n) $ notiStList state }
 
 hideAllNotis tState = do
   state <- readTVarIO tState

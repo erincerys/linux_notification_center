@@ -115,7 +115,7 @@
                   </packing>
                 </child>
                 <child>
-                  <object class="GtkScrolledWindow">
+                  <object class="GtkScrolledWindow" id="scroll_notis">
                     <property name="visible">True</property>
                     <property name="can-focus">True</property>
                     <property name="hexpand">False</property>
