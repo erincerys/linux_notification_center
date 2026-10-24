@@ -441,6 +441,11 @@ from the =deadd.css= file by using the command described in the section
     ### notification center. 0 keeps them until deleted by hand.
     prune-after-hours: 32
 
+    ### Show this many notifications at a time, revealing more as you scroll.
+    ### 0 shows every notification at once.
+    ### Only applies when new-first is true.
+    notifications-per-page: 25
+
     ### Custom buttons in notification center
     buttons:
       ### Numbers of buttons that can be drawn on a row of the notification

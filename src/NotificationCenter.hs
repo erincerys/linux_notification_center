@@ -10,6 +10,8 @@ import NotificationCenter.NotificationInCenter
 import NotificationCenter.Notifications
   (NotifyState(..), startNotificationDaemon, hideAllNotis, dropOrphans)
 import NotificationCenter.Notifications.Data (Notification(..), notiAge)
+import NotificationCenter.Notifications.AbstractNotification
+  (HasDisplayingNotificationContent(dContainer))
 import NotificationCenter.Glade (glade)
 import NotificationCenter.Button
   (Button(..), createButton, setButtonState)
@@ -40,6 +42,7 @@ import Data.Complex
 import Data.Monoid ((<>))
 
 import Control.Applicative
+import Control.Lens (view)
 import Control.Exception (finally)
 import Control.Concurrent (forkIO, threadDelay, ThreadId(..))
 import Control.Concurrent.STM
@@ -60,7 +63,8 @@ import GI.Gtk
        , setWindowWindowPosition, WindowPosition(..), windowMove
        , frameSetShadowType, aspectFrameNew
        , widgetGetAllocatedHeight, widgetGetAllocatedWidth, onWidgetDraw
-       , adjustmentSetValue, adjustmentGetLower, adjustmentGetUpper, adjustmentGetPageSize
+       , adjustmentSetValue, adjustmentGetValue, adjustmentGetLower, adjustmentGetUpper, adjustmentGetPageSize
+       , onAdjustmentValueChanged, containerGetChildren, widgetGetVisible, widgetSetVisible
        , onWidgetLeaveNotifyEvent, onWidgetMotionNotifyEvent
        , onWidgetEnterNotifyEvent, onWidgetScrollEvent
        , widgetAddEvents, alignmentSetPadding, alignmentNew, rangeSetValue
@@ -97,6 +101,9 @@ data State = State
   { stMainWindow :: Gtk.Window
   , stNotiBox :: Gtk.Box
   , stNotiBoxAdj :: Gtk.Adjustment
+  , stNotisPerPage :: Int
+  , stVisibleLimit :: Int
+  , stLastExtendedUpper :: Maybe Double
   , stTimeLabel :: Gtk.Label
   , stDateLabel :: Gtk.Label
   , stDeleteAll :: Gtk.Button
@@ -199,15 +206,23 @@ createNotiCenter tState config catalog = do
   sequence $ Gtk.containerAdd buttonBox <$> lines'
   sequence $ widgetShowAll <$> lines'
 
+  let notisPerPage = if configNotiCenterNewFirst config
+        then configNotiCenterNotisPerPage config
+        else 0
   atomically $ modifyTVar' tState $
     \state -> state { stMainWindow = mainWindow
                       , stNotiBox = notiBox
                       , stNotiBoxAdj = notiBoxAdj
+                      , stNotisPerPage = notisPerPage
+                      , stVisibleLimit = notisPerPage
+                      , stLastExtendedUpper = Nothing
                       , stTimeLabel = timeL
                       , stDateLabel = timeD
                       , stDeleteAll = deleteButton
                       , stNotisForMe = []
                       , stUserButtons = buttons' }
+
+  when (notisPerPage > 0) $ extendLimitOnScroll tState notiBoxAdj
 
   setWindowStyle tState
 
@@ -224,6 +239,22 @@ createNotiCenter tState config catalog = do
 
   onWidgetDestroy mainWindow mainQuit
 
+  return ()
+
+extendLimitOnScroll :: TVar State -> Gtk.Adjustment -> IO ()
+extendLimitOnScroll tState notiBoxAdj = do
+  onAdjustmentValueChanged notiBoxAdj $ do
+    state <- readTVarIO tState
+    value <- adjustmentGetValue notiBoxAdj
+    pageSize <- adjustmentGetPageSize notiBoxAdj
+    upper <- adjustmentGetUpper notiBoxAdj
+    when (value + pageSize >= upper - pageSize
+          && Just upper /= stLastExtendedUpper state
+          && stVisibleLimit state < length (stDisplayingNotiList state)) $ do
+      atomically $ modifyTVar' tState $ \state ->
+        state { stVisibleLimit = stVisibleLimit state + stNotisPerPage state
+              , stLastExtendedUpper = Just upper }
+      applyVisibleLimit tState
   return ()
 
 -- | GDK resets its smooth-scroll baseline on enter only for toplevel
@@ -322,10 +353,12 @@ parseNotisForMe tState = do
 
 hideNotiCenter tState = do
   state <- readTVarIO tState
-  mainWindow <- stMainWindow <$> readTVarIO tState
-  widgetHide mainWindow
-  atomically $ modifyTVar' tState
-    (\state -> state { stCenterShown = False })
+  widgetHide $ stMainWindow state
+  atomically $ modifyTVar' tState $ \state ->
+    state { stCenterShown = False
+          , stVisibleLimit = stNotisPerPage state
+          , stLastExtendedUpper = Nothing }
+  applyVisibleLimit tState
 
 
 showNotiCenter tState notiState config = do
@@ -334,7 +367,7 @@ showNotiCenter tState notiState config = do
   setNotificationCenterPosition mainWindow config
   newShown <- if stCenterShown state then
     do
-      widgetHide mainWindow
+      hideNotiCenter tState
       return False
     else
     do
@@ -357,6 +390,16 @@ showNotiCenter tState notiState config = do
   adjustmentSetValue notiBoxAdj notiBoxAdjVal
 
   return True
+
+applyVisibleLimit :: TVar State -> IO ()
+applyVisibleLimit tState = do
+  addSource $ do
+    state <- readTVarIO tState
+    when (stNotisPerPage state > 0) $ do
+      children <- containerGetChildren $ stNotiBox state
+      mapM_ (\(index, child) -> widgetSetVisible child (index < stVisibleLimit state))
+        $ zip [0..] children
+  return ()
 
 updateNotisForMe :: TVar State -> IO()
 updateNotisForMe tState = do
@@ -403,11 +446,13 @@ updateNotis config tState = do
   when (stCenterShown state || stPopupsPaused state) $
     do
       hideAllNotis $ stNotiState state
+  applyVisibleLimit tState
   return ()
 
 
 removeNoti :: TVar State -> DisplayingNotificationInCenter -> IO ()
 removeNoti tState dNoti = do
+  wasVisible <- widgetGetVisible $ view dContainer dNoti
   state <- readTVarIO tState
   atomically $ modifyTVar' tState $ \state ->
     state { stDisplayingNotiList =
@@ -418,7 +463,7 @@ removeNoti tState dNoti = do
                          (\n -> notiId n /= _dNotiId dNoti) $
                          notiStList state }
   addSource $ _dNotiDestroy dNoti
-  return ()
+  when wasVisible $ applyVisibleLimit tState
 
 pruneNotis :: Config -> TVar State -> IO ()
 pruneNotis config tState = do
